@@ -5,6 +5,9 @@ A lightweight VSCode extension that lets you easily track your GitHub Copilot pr
 ![Pacer UI](images/screenshot.png)
 
 
+> ⚠️ **Note:** This extension currently supports **GitHub Copilot Individual** plans. If you are on a Copilot Business or Enterprise plan, your usage is tied to your organization's billing, and a personal token will correctly (but unhelpfully) report `0` usage.
+
+
 ## Why this exists?
 Standard percentage metrics (e.g., "Used 37%") lack daily context. They don't tell you if you're burning through your limits too fast today or if you have a huge buffer saved up.
 
