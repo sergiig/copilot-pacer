@@ -2,7 +2,7 @@
   "name": "copilot-pacer",
   "displayName": "Pacer for GitHub Copilot",
   "description": "Easily track your GitHub Copilot premium requests with a lightweight and convenient status bar indicator.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "sergiig",
   "repository": {
     "type": "git",
