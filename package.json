@@ -1,0 +1,74 @@
+{
+  "name": "copilot-pacer",
+  "displayName": "Pacer for GitHub Copilot",
+  "description": "Easily track your GitHub Copilot premium requests with a lightweight and convenient status bar indicator.",
+  "version": "1.0.0",
+  "publisher": "sergiig",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sergiig/copilot-pacer"
+  },
+  "icon": "images/icon.png",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "github",
+    "tracker",
+    "pacing"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilot-pacer.setToken",
+        "title": "Pacer: Set GitHub Token"
+      },
+      {
+        "command": "copilot-pacer.refresh",
+        "title": "Pacer: Refresh"
+      }
+    ],
+    "configuration": {
+      "title": "Pacer for GitHub Copilot",
+      "properties": {
+        "copilot-pacer.monthlyLimit": {
+          "type": "number",
+          "default": 300,
+          "minimum": 1,
+          "description": "Your monthly Copilot request limit (e.g. 300 for Pro)."
+        },
+        "copilot-pacer.username": {
+          "type": "string",
+          "default": "",
+          "description": "Your GitHub username (e.g. octocat)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.109.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "typescript-eslint": "^8.54.0",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}
