@@ -11,15 +11,17 @@ A lightweight VSCode extension that lets you easily track your GitHub Copilot pr
 ## Why this exists?
 Standard percentage metrics (e.g., "Used 37%") lack daily context. They don't tell you if you're burning through your limits too fast today or if you have a huge buffer saved up.
 
-This extension replaces abstract percentages with a visual pacing bar. It shows exactly where you stand relative to today's date, helping you pace your usage perfectly throughout the month.
+Pacer solves this by merging a **usage progress bar** with a **monthly calendar timeline**.
+
+Imagine your monthly quota as a single timeline. We place two markers `┃` on this timeline to represent the start and end of *today*. Since today is what matters most, the UI acts as a "lens" that zooms in on this specific section.
 
 
 ## Features
-* **Visual Pacing Bar:** The progress bar is dynamically split into three clear zones:
-  * **Past usage:** Requests you've already spent.
-  * **Today's Bracket `[▮▮▯▯▯]`:** Your specific budget window for *today*.
-  * **Future quota:** The remaining requests for the rest of the month.
-* **Smart Tooltip:** Hover over the status bar to see exact numbers, including your exact "debt" or how many requests you have safely left for the day.
+* **Visual Pacing Bar:** The status bar indicator (e.g., `▰▰┃▮▮▯▯▯┃▱▱▱`) is dynamically split into three clear zones:
+  * **Past (`▰▰`):** Requests you've already spent.
+  * **Today's Lens (`┃▮▮▯▯▯┃`):** Your specific budget window for *today*. The fill inside shows your actual usage moving through the day.
+  * **Future (`▱▱▱`):** The remaining quota for the rest of the month.
+* **Smart Tooltip:** Hover over the status bar to see the exact math. The "Remaining today" number is simply the distance to that right marker `┃`, which naturally includes all the unused requests you've saved up from previous days.
 * **Privacy-First:** Your GitHub token is securely stored in VSCode's native encrypted `SecretStorage`. It is never written to plain-text settings or files.
 * **Set and Forget:** The indicator automatically refreshes in the background. Click on the status bar to refresh it manually anytime.
 
