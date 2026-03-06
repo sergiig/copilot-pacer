@@ -30,51 +30,17 @@ class NotFoundError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Validated settings
+// Usage data
 // ---------------------------------------------------------------------------
 
-interface ValidatedSettings {
-  token: string;
-  username: string;
+/** Represents fetched Copilot usage regardless of which API provided it. */
+interface CopilotUsage {
+  usedRequests: number;
   monthlyLimit: number;
-}
-
-/**
- * Reads, validates and — where possible — auto-corrects every setting the
- * extension needs. Returns `null` when no token is available (the caller
- * should prompt the user to enter one).
- *
- * Validation rules:
- * • **token** — must be present in SecretStorage; otherwise returns `null`.
- * • **monthlyLimit** — must be a finite number > 0; invalid values are
- *   silently reset to the default (300).
- * • **username** — must be non-empty; when missing it is resolved
- *   automatically from the GitHub API using the stored token.
- *
- * Throws `TokenExpiredError` if the token turns out to be invalid while
- * resolving the username.
- */
-async function resolveSettings(): Promise<ValidatedSettings | null> {
-  const token = await secretStorage.get("copilot-pacer.githubToken");
-  if (!token) { return null; }
-
-  const config = vscode.workspace.getConfiguration("copilot-pacer");
-
-  // --- monthly limit ---------------------------------------------------------
-  let monthlyLimit = config.get<number>("monthlyLimit") ?? DEFAULT_MONTHLY_LIMIT;
-  if (!Number.isFinite(monthlyLimit) || monthlyLimit <= 0) {
-    monthlyLimit = DEFAULT_MONTHLY_LIMIT;
-    await config.update("monthlyLimit", DEFAULT_MONTHLY_LIMIT, vscode.ConfigurationTarget.Global);
-  }
-
-  // --- username --------------------------------------------------------------
-  let username = config.get<string>("username")?.trim();
-  if (!username) {
-    username = await fetchUsername(token); // may throw TokenExpiredError
-    await config.update("username", username, vscode.ConfigurationTarget.Global);
-  }
-
-  return { token, username, monthlyLimit };
+  /** Start of the current billing period (UTC midnight). */
+  periodStart: Date;
+  /** End of the current billing period (UTC midnight). */
+  periodEnd: Date;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +63,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("copilot-pacer.setToken", async () => {
       const token = await vscode.window.showInputBox({
-        prompt: "Enter your GitHub Personal Access Token (requires read:billing scope)",
+        prompt: "Enter your GitHub Personal Access Token (requires copilot scope)",
         password: true,
         ignoreFocusOut: true,
       });
@@ -152,10 +118,47 @@ async function fetchUsername(token: string): Promise<string> {
 }
 
 /**
- * Fetches the current Copilot premium-request usage from the GitHub Billing API.
- * Returns the number of used requests, or throws on network / API errors.
+ * Fetches Copilot usage from the **internal** API (near real-time).
+ * Endpoint: GET /copilot_internal/user
+ *
+ * This is an undocumented GitHub API that returns accurate quota snapshots
+ * including `premium_interactions` with remaining/entitlement data and the
+ * billing period reset date.
  */
-async function fetchUsedRequests(token: string, username: string): Promise<number> {
+async function fetchCopilotInternal(token: string): Promise<CopilotUsage> {
+  const url = "https://api.github.com/copilot_internal/user";
+  const response = await fetch(url, { headers: GITHUB_API_HEADERS(token) });
+  throwOnHttpError(response, url);
+
+  const data = (await response.json()) as any;
+  const premium = data.quota_snapshots?.premium_interactions;
+  if (!premium || premium.unlimited) {
+    throw new Error("No premium_interactions quota in internal API response");
+  }
+
+  const entitlement = premium.entitlement as number;
+  const remaining = premium.quota_remaining as number;
+  const periodEnd = new Date(data.quota_reset_date_utc);
+  const periodStart = new Date(periodEnd);
+  periodStart.setUTCMonth(periodStart.getUTCMonth() - 1);
+
+  return {
+    usedRequests: entitlement - remaining,
+    monthlyLimit: entitlement,
+    periodStart,
+    periodEnd,
+  };
+}
+
+/**
+ * Fetches Copilot usage from the **billing** API (official, may lag behind).
+ * Endpoint: GET /users/{username}/settings/billing/usage/summary
+ */
+async function fetchCopilotBilling(
+  token: string,
+  username: string,
+  monthlyLimit: number,
+): Promise<CopilotUsage> {
   const url =
     `https://api.github.com/users/${username}/settings/billing/usage/summary`;
   const response = await fetch(url, { headers: GITHUB_API_HEADERS(token) });
@@ -165,7 +168,14 @@ async function fetchUsedRequests(token: string, username: string): Promise<numbe
   const copilotItem = data.usageItems?.find(
     (item: any) => item.sku === "copilot_premium_request",
   );
-  return copilotItem ? copilotItem.grossQuantity : 0;
+  const usedRequests = copilotItem ? copilotItem.grossQuantity : 0;
+
+  // Billing API doesn't expose period dates — assume calendar month
+  const now = new Date();
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+
+  return { usedRequests, monthlyLimit, periodStart, periodEnd };
 }
 
 interface PacingResult {
@@ -192,17 +202,23 @@ function renderBlock(
 // Visual layout: [past ▰▱][lens ┃▮▯┃][future ▰▱]
 //
 // The "lens" magnifies today so you can see intra-day progress precisely while
-// the flanking zones compress the rest of the month into a fixed character width.
-function calculatePacing(usedRequests: number, monthlyLimit: number): PacingResult {
+// the flanking zones compress the rest of the billing period into a fixed
+// character width.
+function calculatePacing(usage: CopilotUsage): PacingResult {
   const now = new Date();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const currentDay = now.getDate();
+  const { usedRequests, monthlyLimit, periodStart, periodEnd } = usage;
+
+  const totalMs = periodEnd.getTime() - periodStart.getTime();
+  const elapsedMs = Math.max(0, now.getTime() - periodStart.getTime());
+  const totalDays = Math.round(totalMs / (24 * 60 * 60 * 1000));
+  const elapsedDays = Math.min(totalDays, elapsedMs / (24 * 60 * 60 * 1000));
+  const currentDay = Math.min(totalDays, Math.floor(elapsedDays) + 1);
 
   const OUTSIDE_WIDTH = 12; // Total chars shared between past and future zones
   const LENS_INNER_WIDTH = 5; // Inner width of the lens zone: ┃▮▮▯▯▯┃
 
   const pastDays = currentDay - 1;
-  const totalOutsideDays = daysInMonth - 1;
+  const totalOutsideDays = totalDays - 1;
 
   // Distribute the outside character budget proportionally between past and future
   const pastChars =
@@ -212,7 +228,7 @@ function calculatePacing(usedRequests: number, monthlyLimit: number): PacingResu
   const futureChars = OUTSIDE_WIDTH - pastChars;
 
   // Quota boundaries expressed as absolute request counts
-  const dailyBudget = monthlyLimit / daysInMonth;
+  const dailyBudget = monthlyLimit / totalDays;
   const startOfTodayQuota = pastDays * dailyBudget;
   const endOfTodayQuota = currentDay * dailyBudget;
 
@@ -262,23 +278,26 @@ function showPromptForToken(text: string, tooltip: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Orchestrates: resolve settings → fetch usage → calculate → update UI.
+ * Orchestrates: fetch usage → calculate → update UI.
+ *
+ * Data-source strategy:
+ * 1. Try the internal Copilot API first (near real-time, no username needed).
+ * 2. If that fails, fall back to the official billing API (may lag behind).
  *
  * Self-healing behaviour:
- * • Invalid / missing token → prompts user to enter one.
- * • Invalid monthlyLimit   → silently resets to 300.
- * • Invalid username (404) → clears the cached value, re-resolves from
- *   the GitHub API, and retries the request once.
+ * • Invalid / missing token  → prompts user to enter one.
+ * • Invalid monthlyLimit     → silently resets to 300 (billing fallback).
+ * • Invalid username (404)   → clears cached value, re-resolves, retries.
+ * • Token expired (401)      → clears token, prompts for a new one.
  */
 async function updatePacing() {
   statusBarItem.text = `$(sync~spin) Pacer...`;
   statusBarItem.show();
 
   try {
-    // 1. Validate & resolve every setting we need
-    const settings = await resolveSettings();
+    const token = await secretStorage.get("copilot-pacer.githubToken");
 
-    if (!settings) {
+    if (!token) {
       showPromptForToken(
         "$(key) Pacer: No token",
         "Click to set your GitHub Personal Access Token.",
@@ -289,28 +308,47 @@ async function updatePacing() {
     // Token is present — clicking the bar triggers a refresh
     statusBarItem.command = "copilot-pacer.refresh";
 
-    // 2. Fetch usage — auto-heal a stale/invalid username on 404
-    let usedRequests: number;
+    // --- Try the internal Copilot API first (near real-time) -----------------
+    let usage: CopilotUsage;
     try {
-      usedRequests = await fetchUsedRequests(settings.token, settings.username);
-    } catch (error) {
-      if (error instanceof NotFoundError) {
-        // Cached username is likely wrong — re-resolve from GitHub
-        const config = vscode.workspace.getConfiguration("copilot-pacer");
-        await config.update("username", undefined, vscode.ConfigurationTarget.Global);
+      usage = await fetchCopilotInternal(token);
+    } catch (internalError) {
+      // Re-throw auth errors immediately — no point trying billing API
+      if (internalError instanceof TokenExpiredError) { throw internalError; }
 
-        const freshUsername = await fetchUsername(settings.token);
-        await config.update("username", freshUsername, vscode.ConfigurationTarget.Global);
+      // Internal API unavailable — fall back to the billing API
+      const config = vscode.workspace.getConfiguration("copilot-pacer");
 
-        usedRequests = await fetchUsedRequests(settings.token, freshUsername);
-      } else {
-        throw error; // TokenExpiredError or other — handled below
+      let monthlyLimit = config.get<number>("monthlyLimit") ?? DEFAULT_MONTHLY_LIMIT;
+      if (!Number.isFinite(monthlyLimit) || monthlyLimit <= 0) {
+        monthlyLimit = DEFAULT_MONTHLY_LIMIT;
+        await config.update("monthlyLimit", DEFAULT_MONTHLY_LIMIT, vscode.ConfigurationTarget.Global);
+      }
+
+      let username = config.get<string>("username")?.trim();
+      if (!username) {
+        username = await fetchUsername(token);
+        await config.update("username", username, vscode.ConfigurationTarget.Global);
+      }
+
+      try {
+        usage = await fetchCopilotBilling(token, username, monthlyLimit);
+      } catch (billingError) {
+        if (billingError instanceof NotFoundError) {
+          // Cached username is likely wrong — re-resolve from GitHub
+          await config.update("username", undefined, vscode.ConfigurationTarget.Global);
+          const freshUsername = await fetchUsername(token);
+          await config.update("username", freshUsername, vscode.ConfigurationTarget.Global);
+          usage = await fetchCopilotBilling(token, freshUsername, monthlyLimit);
+        } else {
+          throw billingError;
+        }
       }
     }
 
-    // 3. Calculate pacing & update the status bar
-    const { progressBar, buffer, monthlyLimit } =
-      calculatePacing(usedRequests, settings.monthlyLimit);
+    // --- Calculate pacing & update the status bar ----------------------------
+    const { progressBar, buffer, monthlyLimit, usedRequests } =
+      calculatePacing(usage);
 
     statusBarItem.text = progressBar;
 
