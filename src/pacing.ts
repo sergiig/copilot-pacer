@@ -1,5 +1,11 @@
 import { CopilotUsage, PacingResult } from "./types";
 
+const COST_PER_REQUEST = 0.04;
+
+function formatCost(cost: number): string {
+  return `$${cost.toFixed(2)}`;
+}
+
 // Renders a single progress zone as a string of filled/empty block characters.
 function renderBlock(
   width: number,
@@ -65,8 +71,14 @@ export function calculatePacing(usage: CopilotUsage): PacingResult {
       futureQuota === 0 ? 1 : (usedRequests - endOfTodayQuota) / futureQuota;
   }
 
+  const overageRequests = Math.max(0, usedRequests - monthlyLimit);
+  const overageCost = overageRequests * COST_PER_REQUEST;
+
   const pastStr = renderBlock(pastChars, pastRatio, "▰", "▱");
-  const lensStr = `┃${renderBlock(LENS_INNER_WIDTH, lensRatio, "▮", "▯")}┃`;
+  const lensInner = overageCost > 0
+    ? formatCost(overageCost)
+    : renderBlock(LENS_INNER_WIDTH, lensRatio, "▮", "▯");
+  const lensStr = `┃${lensInner}┃`;
   const futureStr = renderBlock(futureChars, futureRatio, "▰", "▱");
 
   return {
@@ -74,5 +86,6 @@ export function calculatePacing(usage: CopilotUsage): PacingResult {
     buffer: endOfTodayQuota - usedRequests,
     usedRequests,
     monthlyLimit,
+    overageCost,
   };
 }
