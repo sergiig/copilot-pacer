@@ -13,6 +13,8 @@ export interface PacingResult {
   buffer: number;         // Positive = requests remaining today; negative = overspent
   usedRequests: number;
   monthlyLimit: number;
+  overageRequests: number; // Requests exceeding monthlyLimit (0 if within limit)
+  overageCost: number;     // Dollar cost for overage requests ($0.04 each)
 }
 
 // ---------------------------------------------------------------------------

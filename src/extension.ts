@@ -27,7 +27,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Register a command so the user can manually trigger a refresh from the command palette
   context.subscriptions.push(
     vscode.commands.registerCommand("copilot-pacer.refresh", () => {
-      updatePacing();
+      updatePacing(true);
     }),
   );
 
@@ -37,7 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
   updatePacing();
 
   // Auto-refresh every 10 minutes
-  setInterval(updatePacing, 10 * 60 * 1000);
+  setInterval(() => updatePacing(), 10 * 60 * 1000);
 }
 
 export function deactivate() {}
