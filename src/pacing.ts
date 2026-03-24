@@ -86,6 +86,7 @@ export function calculatePacing(usage: CopilotUsage): PacingResult {
     buffer: endOfTodayQuota - usedRequests,
     usedRequests,
     monthlyLimit,
+    overageRequests,
     overageCost,
   };
 }

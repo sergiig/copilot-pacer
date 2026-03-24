@@ -63,12 +63,13 @@ async function resolveToken(showProgress: boolean): Promise<string | undefined> 
  * 2. If that fails, fall back to the official billing API (may lag behind).
  *
  * Self-healing behaviour:
- * • Invalid / missing token  → prompts user to enter one.
- * • Invalid monthlyLimit     → silently resets to 300 (billing fallback).
- * • Invalid username (404)   → clears cached value, re-resolves, retries.
- * • Token expired (401)      → clears token, prompts for a new one.
+ * • No GitHub session         → prompts to sign in on manual refresh.
+ * • Invalid monthlyLimit      → silently resets to 300 (billing fallback).
+ * • Invalid username (404)    → clears cached value, re-resolves, retries.
+ * • Token expired (401)       → clears token, prompts for a new one.
  */
 export async function updatePacing(showProgress: boolean = false) {
+  statusBarItem.command = "copilot-pacer.refresh";
   if (showProgress) {
     statusBarItem.text = `$(sync~spin) Pacer...`;
   }
@@ -117,16 +118,15 @@ export async function updatePacing(showProgress: boolean = false) {
     }
 
     // --- Calculate pacing & update the status bar ----------------------------
-    const { progressBar, buffer, monthlyLimit, usedRequests, overageCost } =
+    const { progressBar, buffer, monthlyLimit, usedRequests, overageRequests, overageCost } =
       calculatePacing(usage);
 
     statusBarItem.text = progressBar;
 
     if (overageCost > 0) {
-      const overageRequests = Math.round(usedRequests - monthlyLimit);
       statusBarItem.tooltip =
         `Requests: ${Math.round(usedRequests)} / ${monthlyLimit}\n` +
-        `💰 Paid premium: ${overageRequests} requests ($${overageCost.toFixed(2)})`;
+        `💰 Paid premium: ${Math.round(overageRequests)} requests ($${overageCost.toFixed(2)})`;
       statusBarItem.color = new vscode.ThemeColor("statusBarItem.warningForeground");
     } else if (buffer >= 0) {
       statusBarItem.tooltip =
