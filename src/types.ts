@@ -10,9 +10,14 @@ export interface CopilotUsage {
 
 export interface PacingResult {
   progressBar: string;
-  buffer: number;         // Positive = requests remaining today; negative = overspent
+  /** Requests remaining in today's daily budget (negative = over daily budget). */
+  buffer: number;
   usedRequests: number;
   monthlyLimit: number;
+  /** Requests used since the first fetch of the current UTC day. */
+  todayUsedRequests: number;
+  /** Adaptive daily quota: remainingRequests / remainingDays at UTC day start. */
+  dailyBudget: number;
   overageRequests: number; // Requests exceeding monthlyLimit (0 if within limit)
   overageCost: number;     // Dollar cost for overage requests ($0.04 each)
 }

@@ -22,10 +22,17 @@ function renderBlock(
 //
 // Visual layout: [past ▰▱][lens ┃▮▯┃][future ▰▱]
 //
-// The "lens" magnifies today so you can see intra-day progress precisely while
-// the flanking zones compress the rest of the billing period into a fixed
+// The "lens" shows intra-day progress against the adaptive daily budget:
+// remainingRequests / remainingDays at the start of the UTC day.
+// 100 % = one full adaptive day's allocation consumed.
+// The flanking zones compress the rest of the billing period into a fixed
 // character width.
-export function calculatePacing(usage: CopilotUsage): PacingResult {
+//
+// @param todayUsed           Requests used since the first refresh today (from
+//                            globalState daily baseline — see statusBar.ts).
+// @param adaptiveDailyBudget Adaptive daily quota: remainingRequests / remainingDays,
+//                            computed once per UTC day in statusBar.ts.
+export function calculatePacing(usage: CopilotUsage, todayUsed: number, adaptiveDailyBudget: number): PacingResult {
   const now = new Date();
   const { usedRequests, monthlyLimit, periodStart, periodEnd } = usage;
 
@@ -48,28 +55,30 @@ export function calculatePacing(usage: CopilotUsage): PacingResult {
       : Math.round((pastDays / totalOutsideDays) * OUTSIDE_WIDTH);
   const futureChars = OUTSIDE_WIDTH - pastChars;
 
-  // Quota boundaries expressed as absolute request counts
-  const dailyBudget = monthlyLimit / totalDays;
-  const startOfTodayQuota = pastDays * dailyBudget;
-  const endOfTodayQuota = currentDay * dailyBudget;
+  const dailyBudget = adaptiveDailyBudget;
+  // Static budget used only for the past-zone reference: expected cumulative pace
+  const staticDailyBudget = monthlyLimit / totalDays;
+  // Cumulative quota expected by the start of today (= end of yesterday)
+  const dayStartQuota = pastDays * staticDailyBudget;
 
-  let pastRatio = 0, lensRatio = 0, futureRatio = 0;
+  // Past zone: proportion of expected cumulative pace consumed through yesterday.
+  const accumulatedBeforeToday = usedRequests - todayUsed;
+  const pastRatio =
+    dayStartQuota === 0
+      ? 1
+      : Math.min(1, Math.max(0, accumulatedBeforeToday / dayStartQuota));
 
-  if (usedRequests < startOfTodayQuota) {
-    // Zone 1: Usage is below today's opening quota — ahead of schedule
-    pastRatio = startOfTodayQuota === 0 ? 0 : usedRequests / startOfTodayQuota;
-  } else if (usedRequests <= endOfTodayQuota) {
-    // Zone 2: Usage falls inside today's lens window — on track
-    pastRatio = 1;
-    lensRatio = (usedRequests - startOfTodayQuota) / dailyBudget;
-  } else {
-    // Zone 3: Usage has exceeded today's closing quota — borrowing from the future
-    pastRatio = 1;
-    lensRatio = 1;
-    const futureQuota = monthlyLimit - endOfTodayQuota;
-    futureRatio =
-      futureQuota === 0 ? 1 : (usedRequests - endOfTodayQuota) / futureQuota;
-  }
+  // Today (lens) zone: fraction of adaptive daily budget consumed so far.
+  // 0 % at day start, 100 % when adaptiveDailyBudget requests have been used today.
+  const lensRatio = Math.min(1, Math.max(0, todayUsed / dailyBudget));
+
+  // Future zone: fills only when today's usage exceeds the adaptive daily budget,
+  // showing how much future quota is being borrowed.
+  const futureQuota = Math.max(0, monthlyLimit - accumulatedBeforeToday - dailyBudget);
+  const futureRatio =
+    futureQuota > 0
+      ? Math.min(1, Math.max(0, (todayUsed - dailyBudget) / futureQuota))
+      : 0;
 
   const overageRequests = Math.max(0, usedRequests - monthlyLimit);
   const overageCost = overageRequests * COST_PER_REQUEST;
@@ -83,9 +92,11 @@ export function calculatePacing(usage: CopilotUsage): PacingResult {
 
   return {
     progressBar: `${pastStr}${lensStr}${futureStr}`,
-    buffer: endOfTodayQuota - usedRequests,
+    buffer: dailyBudget - todayUsed,
     usedRequests,
     monthlyLimit,
+    todayUsedRequests: todayUsed,
+    dailyBudget,
     overageRequests,
     overageCost,
   };
