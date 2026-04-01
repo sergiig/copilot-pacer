@@ -2,8 +2,12 @@ import * as vscode from "vscode";
 import * as config from "./config";
 import { initStatusBar, updatePacing } from "./statusBar";
 
+export let outputChannel: vscode.OutputChannel;
+
 export function activate(context: vscode.ExtensionContext) {
-  console.log("Pacer for GitHub Copilot activated");
+  outputChannel = vscode.window.createOutputChannel("Pacer for GitHub Copilot");
+  context.subscriptions.push(outputChannel);
+  outputChannel.appendLine("Pacer for GitHub Copilot activated");
 
   config.initSecretStorage(context.secrets);
   initStatusBar(context);

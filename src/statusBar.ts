@@ -3,8 +3,24 @@ import { CopilotUsage, TokenExpiredError, NotFoundError } from "./types";
 import { fetchCopilotInternal, fetchCopilotBilling, fetchUsername } from "./api";
 import { calculatePacing } from "./pacing";
 import * as config from "./config";
+import * as ext from "./extension";
 
 let statusBarItem: vscode.StatusBarItem;
+let globalState: vscode.Memento & { setKeysForSync(keys: readonly string[]): void };
+
+type DailyBaselineState = {
+  date: string;
+  baseline: number;
+  lastSeen: number;
+  periodStartKey?: string;
+};
+
+type AdaptiveQuotaState = {
+  date: string;
+  quota: number;
+  periodStartKey?: string;
+  baseline?: number;
+};
 
 export function initStatusBar(context: vscode.ExtensionContext): void {
   statusBarItem = vscode.window.createStatusBarItem(
@@ -13,6 +29,156 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
   );
   statusBarItem.command = "copilot-pacer.refresh";
   context.subscriptions.push(statusBarItem);
+  globalState = context.globalState;
+  globalState.setKeysForSync(["copilot-pacer.dailyBaseline", "copilot-pacer.adaptiveQuota"]);
+}
+
+/**
+ * Returns the number of requests used since UTC midnight (best effort).
+ *
+ * Stores { date, baseline, lastSeen } in globalState:
+ * - `baseline`  — cumulative value at the start of the current UTC day
+ *                 (set from the previous day's `lastSeen` when the day rolls
+ *                 over, so requests made before VS Code opens are included).
+ * - `lastSeen`  — most recent cumulative value; updated on every refresh so
+ *                 it serves as the next day's baseline.
+ *
+ * Limitation: the very first time the extension runs on a non-period-start day,
+ * `baseline` is set to `currentUsed` and `todayUsed` starts at 0 for that
+ * session. On the first day of a new billing period, the baseline resets to 0.
+ */
+export function resolveDailyBaseline(
+  stored: DailyBaselineState | undefined,
+  currentUsed: number,
+  todayKey: string,
+  periodStartKey: string,
+): { todayUsed: number; state: DailyBaselineState } {
+  const periodStartedToday = periodStartKey === todayKey;
+  const billingCounterReset = stored !== undefined && currentUsed < stored.lastSeen;
+  const baselineMovedBackwards = stored !== undefined && currentUsed < stored.baseline;
+  const periodChanged = stored?.periodStartKey !== undefined && stored.periodStartKey !== periodStartKey;
+  const dayRolledOver = stored !== undefined && stored.date !== todayKey;
+
+  if (!stored || dayRolledOver || periodChanged || billingCounterReset || baselineMovedBackwards) {
+    const baseline = periodStartedToday
+      ? 0
+      : dayRolledOver && stored
+        ? stored.lastSeen
+        : currentUsed;
+
+    return {
+      todayUsed: Math.max(0, currentUsed - baseline),
+      state: {
+        date: todayKey,
+        baseline,
+        lastSeen: currentUsed,
+        periodStartKey,
+      },
+    };
+  }
+
+  return {
+    todayUsed: Math.max(0, currentUsed - stored.baseline),
+    state: {
+      ...stored,
+      lastSeen: currentUsed,
+      periodStartKey,
+    },
+  };
+}
+
+function getTodayUsed(usage: CopilotUsage): number {
+  const todayKey = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
+  const periodStartKey = usage.periodStart.toISOString().slice(0, 10);
+  const stored = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
+  const resolved = resolveDailyBaseline(stored, usage.usedRequests, todayKey, periodStartKey);
+
+  globalState.update("copilot-pacer.dailyBaseline", resolved.state);
+  return resolved.todayUsed;
+}
+
+/** Returns the number of UTC days remaining in the billing period, including today. */
+function daysUntilPeriodEnd(periodEnd: Date): number {
+  const now = new Date();
+  const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const endMs = Date.UTC(periodEnd.getUTCFullYear(), periodEnd.getUTCMonth(), periodEnd.getUTCDate());
+  return Math.max(1, Math.ceil((endMs - todayMs) / (24 * 60 * 60 * 1000)));
+}
+
+/**
+ * Returns the adaptive daily budget for today: remainingRequests / remainingDays.
+ *
+ * Computed exactly once per UTC day and stored in globalState under
+ * `copilot-pacer.adaptiveQuota` as { date, quota }.  The cached value is
+ * returned unchanged for the rest of the day so the denominator does not
+ * shift as requests are consumed during the day.
+ *
+ * Must be called AFTER getTodayUsed() so that the dailyBaseline entry has
+ * already been written with the correct `baseline` for today.
+ */
+export function resolveAdaptiveDailyBudget(
+  stored: AdaptiveQuotaState | undefined,
+  todayKey: string,
+  periodStartKey: string,
+  todayStartUsed: number,
+  monthlyLimit: number,
+  remainingDays: number,
+): { quota: number; state: AdaptiveQuotaState; reused: boolean } {
+  if (
+    stored
+    && stored.date === todayKey
+    && stored.periodStartKey === periodStartKey
+    && stored.baseline === todayStartUsed
+  ) {
+    return {
+      quota: stored.quota,
+      state: stored,
+      reused: true,
+    };
+  }
+
+  const remainingRequests = Math.max(0, monthlyLimit - todayStartUsed);
+  const quota = Math.max(1, remainingRequests / remainingDays);
+
+  return {
+    quota,
+    state: {
+      date: todayKey,
+      quota,
+      periodStartKey,
+      baseline: todayStartUsed,
+    },
+    reused: false,
+  };
+}
+
+function getAdaptiveDailyBudget(usage: CopilotUsage): number {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const periodStartKey = usage.periodStart.toISOString().slice(0, 10);
+  const storedQuota = globalState.get<AdaptiveQuotaState>("copilot-pacer.adaptiveQuota");
+
+  // Recompute from today's opening baseline unless a matching cache exists.
+  const storedBaseline = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
+  const todayStartUsed = storedBaseline?.baseline ?? usage.usedRequests;
+  const remainingDays = daysUntilPeriodEnd(usage.periodEnd);
+  const resolved = resolveAdaptiveDailyBudget(
+    storedQuota,
+    todayKey,
+    periodStartKey,
+    todayStartUsed,
+    usage.monthlyLimit,
+    remainingDays,
+  );
+
+  if (!resolved.reused) {
+    const remainingRequests = Math.max(0, usage.monthlyLimit - todayStartUsed);
+    globalState.update("copilot-pacer.adaptiveQuota", resolved.state);
+    ext.outputChannel.appendLine(
+      `[adaptive quota] remaining=${Math.round(remainingRequests)} / ${remainingDays} days → ${Math.round(resolved.quota)}/day`
+    );
+  }
+
+  return resolved.quota;
 }
 
 function showPromptForToken(text: string, tooltip: string): void {
@@ -62,7 +228,7 @@ async function resolveToken(showProgress: boolean): Promise<string | undefined> 
  * 1. Try the internal Copilot API first (near real-time, no username needed).
  * 2. If that fails, fall back to the official billing API (may lag behind).
  *
- * Self-healing behaviour:
+ * Self-healing behavior:
  * • No GitHub session         → prompts to sign in on manual refresh.
  * • Invalid monthlyLimit      → silently resets to 300 (billing fallback).
  * • Invalid username (404)    → clears cached value, re-resolves, retries.
@@ -89,9 +255,14 @@ export async function updatePacing(showProgress: boolean = false) {
     let usage: CopilotUsage;
     try {
       usage = await fetchCopilotInternal(token);
+      ext.outputChannel.appendLine(
+        `[internal API] used=${Math.round(usage.usedRequests)} / ${usage.monthlyLimit}` +
+        ` | period ${usage.periodStart.toISOString().slice(0,10)} → ${usage.periodEnd.toISOString().slice(0,10)}`
+      );
     } catch (internalError) {
       // Re-throw auth errors immediately — no point trying billing API
       if (internalError instanceof TokenExpiredError) { throw internalError; }
+      ext.outputChannel.appendLine(`[internal API] failed: ${internalError}`);
 
       // Internal API unavailable — fall back to the billing API
       const monthlyLimit = await config.getMonthlyLimit();
@@ -115,29 +286,45 @@ export async function updatePacing(showProgress: boolean = false) {
           throw billingError;
         }
       }
+      ext.outputChannel.appendLine(
+        `[billing API] used=${Math.round(usage.usedRequests)} / ${usage.monthlyLimit}` +
+        ` | period ${usage.periodStart.toISOString().slice(0,10)} → ${usage.periodEnd.toISOString().slice(0,10)}`
+      );
     }
 
+    // Compute intra-day usage from the daily baseline stored in globalState.
+    // The baseline resets at UTC midnight so todayUsed always reflects the
+    // current UTC day only.
+    const todayUsed = getTodayUsed(usage);
+    const adaptiveDailyBudget = getAdaptiveDailyBudget(usage);
+
     // --- Calculate pacing & update the status bar ----------------------------
-    const { progressBar, buffer, monthlyLimit, usedRequests, overageRequests, overageCost } =
-      calculatePacing(usage);
+    const result = calculatePacing(usage, todayUsed, adaptiveDailyBudget);
+    ext.outputChannel.appendLine(
+      `[today] used=${Math.round(result.todayUsedRequests)} / ${Math.round(result.dailyBudget)} (adaptive)`
+    );
+    const { progressBar, buffer, monthlyLimit, usedRequests, overageRequests, overageCost, todayUsedRequests, dailyBudget } = result;
 
     statusBarItem.text = progressBar;
 
     if (overageCost > 0) {
       statusBarItem.tooltip =
         `Requests: ${Math.round(usedRequests)} / ${monthlyLimit}\n` +
+        `Today: ${Math.round(todayUsedRequests)} / ${Math.round(dailyBudget)}\n` +
         `💰 Paid premium: ${Math.round(overageRequests)} requests ($${overageCost.toFixed(2)})`;
-      statusBarItem.color = new vscode.ThemeColor("statusBarItem.warningForeground");
-    } else if (buffer >= 0) {
+      statusBarItem.color = new vscode.ThemeColor("statusBarItem.errorForeground");
+    } else if (buffer < 0) {
       statusBarItem.tooltip =
         `Requests: ${Math.round(usedRequests)} / ${monthlyLimit}\n` +
-        `✅ On track. Remaining today: ~${Math.floor(buffer)} requests.`;
-      statusBarItem.color = undefined;
+        `Today: ${Math.round(todayUsedRequests)} / ${Math.round(dailyBudget)}\n` +
+        `🔥 Over daily budget! Debt: ~${Math.abs(Math.floor(buffer))} requests.`;
+      statusBarItem.color = new vscode.ThemeColor("statusBarItem.warningForeground");
     } else {
       statusBarItem.tooltip =
         `Requests: ${Math.round(usedRequests)} / ${monthlyLimit}\n` +
-        `🔥 Over budget! Debt: ~${Math.abs(Math.floor(buffer))} requests.`;
-      statusBarItem.color = new vscode.ThemeColor("statusBarItem.errorForeground");
+        `Today: ${Math.round(todayUsedRequests)} / ${Math.round(dailyBudget)}\n` +
+        `✅ Remaining today: ~${Math.floor(buffer)} requests.`;
+      statusBarItem.color = undefined;
     }
   } catch (error) {
     if (error instanceof TokenExpiredError) {

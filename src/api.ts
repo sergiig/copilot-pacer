@@ -45,13 +45,18 @@ export async function fetchCopilotInternal(token: string): Promise<CopilotUsage>
   throwOnHttpError(response, url);
 
   const data = (await response.json()) as any;
-  const premium = data.quota_snapshots?.premium_interactions;
+  const quotaArr = data.quota_snapshots
+    ? Object.values(data.quota_snapshots) as any[]
+    : [];
+  const premium = quotaArr.find(
+    (q: any) => q.quota_id === "premium_interactions"
+  );
   if (!premium || premium.unlimited) {
     throw new Error("No premium_interactions quota in internal API response");
   }
 
   const entitlement = premium.entitlement as number;
-  const remaining = premium.quota_remaining as number;
+  const remaining = premium.remaining as number;
   const periodEnd = new Date(data.quota_reset_date_utc);
   const periodStart = new Date(periodEnd);
   periodStart.setUTCMonth(periodStart.getUTCMonth() - 1);

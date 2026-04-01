@@ -2,6 +2,7 @@
 .vscode-test/**
 src/**
 .gitignore
+.gitmodules
 .yarnrc
 vsc-extension-quickstart.md
 **/tsconfig.json
@@ -9,3 +10,12 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+# local dev / senv files — not for the published extension
+a.commit
+a.diff
+build.bat
+senv.bat
+changelog-header.md
+version.txt
+docs/**
+tools/**
