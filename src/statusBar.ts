@@ -8,6 +8,13 @@ import * as ext from "./extension";
 let statusBarItem: vscode.StatusBarItem;
 let globalState: vscode.Memento & { setKeysForSync(keys: readonly string[]): void };
 
+type DailyBaselineState = {
+  date: string;
+  baseline: number;
+  lastSeen: number;
+  periodStartKey?: string;
+};
+
 export function initStatusBar(context: vscode.ExtensionContext): void {
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -29,34 +36,58 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
  * - `lastSeen`  — most recent cumulative value; updated on every refresh so
  *                 it serves as the next day's baseline.
  *
- * Limitation: the very first time the extension runs ever, `baseline` is set
- * to `currentUsed` and `todayUsed` starts at 0 for that session.
+ * Limitation: the very first time the extension runs on a non-period-start day,
+ * `baseline` is set to `currentUsed` and `todayUsed` starts at 0 for that
+ * session. On the first day of a new billing period, the baseline resets to 0.
  */
-function getTodayUsed(currentUsed: number): number {
-  const todayKey = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
-  const stored = globalState.get<{ date: string; baseline: number; lastSeen: number }>(
-    "copilot-pacer.dailyBaseline"
-  );
+export function resolveDailyBaseline(
+  stored: DailyBaselineState | undefined,
+  currentUsed: number,
+  todayKey: string,
+  periodStartKey: string,
+): { todayUsed: number; state: DailyBaselineState } {
+  const periodStartedToday = periodStartKey === todayKey;
+  const billingCounterReset = stored !== undefined && currentUsed < stored.lastSeen;
+  const baselineMovedBackwards = stored !== undefined && currentUsed < stored.baseline;
+  const periodChanged = stored?.periodStartKey !== undefined && stored.periodStartKey !== periodStartKey;
+  const dayRolledOver = stored !== undefined && stored.date !== todayKey;
 
-  if (!stored || stored.date !== todayKey) {
-    // Day rolled over (or first-ever run).
-    // Use yesterday's lastSeen as today's baseline so that requests made
-    // after VS Code was last closed yesterday are still counted today.
-    const baseline = stored ? stored.lastSeen : currentUsed;
-    globalState.update("copilot-pacer.dailyBaseline", {
-      date: todayKey,
-      baseline,
-      lastSeen: currentUsed,
-    });
-    return Math.max(0, currentUsed - baseline);
+  if (!stored || dayRolledOver || periodChanged || billingCounterReset || baselineMovedBackwards) {
+    const baseline = periodStartedToday
+      ? 0
+      : dayRolledOver && stored
+        ? stored.lastSeen
+        : currentUsed;
+
+    return {
+      todayUsed: Math.max(0, currentUsed - baseline),
+      state: {
+        date: todayKey,
+        baseline,
+        lastSeen: currentUsed,
+        periodStartKey,
+      },
+    };
   }
 
-  // Same day: update lastSeen for future day-rollover, return intra-day delta.
-  globalState.update("copilot-pacer.dailyBaseline", {
-    ...stored,
-    lastSeen: currentUsed,
-  });
-  return Math.max(0, currentUsed - stored.baseline);
+  return {
+    todayUsed: Math.max(0, currentUsed - stored.baseline),
+    state: {
+      ...stored,
+      lastSeen: currentUsed,
+      periodStartKey,
+    },
+  };
+}
+
+function getTodayUsed(usage: CopilotUsage): number {
+  const todayKey = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
+  const periodStartKey = usage.periodStart.toISOString().slice(0, 10);
+  const stored = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
+  const resolved = resolveDailyBaseline(stored, usage.usedRequests, todayKey, periodStartKey);
+
+  globalState.update("copilot-pacer.dailyBaseline", resolved.state);
+  return resolved.todayUsed;
 }
 
 /** Returns the number of UTC days remaining in the billing period, including today. */
@@ -88,9 +119,7 @@ function getAdaptiveDailyBudget(usage: CopilotUsage): number {
   }
 
   // Recompute: start from today's opening baseline (set by getTodayUsed on rollover).
-  const storedBaseline = globalState.get<{ date: string; baseline: number; lastSeen: number }>(
-    "copilot-pacer.dailyBaseline"
-  );
+  const storedBaseline = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
   const todayStartUsed = storedBaseline?.baseline ?? usage.usedRequests;
   const remainingRequests = Math.max(0, usage.monthlyLimit - todayStartUsed);
   const remainingDays = daysUntilPeriodEnd(usage.periodEnd);
@@ -217,7 +246,7 @@ export async function updatePacing(showProgress: boolean = false) {
     // Compute intra-day usage from the daily baseline stored in globalState.
     // The baseline resets at UTC midnight so todayUsed always reflects the
     // current UTC day only.
-    const todayUsed = getTodayUsed(usage.usedRequests);
+    const todayUsed = getTodayUsed(usage);
     const adaptiveDailyBudget = getAdaptiveDailyBudget(usage);
 
     // --- Calculate pacing & update the status bar ----------------------------
