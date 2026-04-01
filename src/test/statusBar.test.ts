@@ -1,6 +1,6 @@
 import * as assert from "assert";
 
-import { resolveDailyBaseline } from "../statusBar";
+import { resolveAdaptiveDailyBudget, resolveDailyBaseline } from "../statusBar";
 
 suite("Status bar quota reset", () => {
   test("resets baseline to zero on the first day of a new billing period", () => {
@@ -45,5 +45,47 @@ suite("Status bar quota reset", () => {
       periodStartKey: "2026-04-01",
     });
     assert.strictEqual(resolved.todayUsed, 8);
+  });
+
+  test("recomputes a stale same-day quota when the billing period changed", () => {
+    const resolved = resolveAdaptiveDailyBudget(
+      {
+        date: "2026-04-01",
+        quota: 8,
+      },
+      "2026-04-01",
+      "2026-04-01",
+      0,
+      1500,
+      30,
+    );
+
+    assert.strictEqual(resolved.reused, false);
+    assert.strictEqual(resolved.quota, 50);
+    assert.deepStrictEqual(resolved.state, {
+      date: "2026-04-01",
+      quota: 50,
+      periodStartKey: "2026-04-01",
+      baseline: 0,
+    });
+  });
+
+  test("reuses the same-day quota when period and baseline still match", () => {
+    const resolved = resolveAdaptiveDailyBudget(
+      {
+        date: "2026-04-01",
+        quota: 50,
+        periodStartKey: "2026-04-01",
+        baseline: 0,
+      },
+      "2026-04-01",
+      "2026-04-01",
+      0,
+      1500,
+      30,
+    );
+
+    assert.strictEqual(resolved.reused, true);
+    assert.strictEqual(resolved.quota, 50);
   });
 });

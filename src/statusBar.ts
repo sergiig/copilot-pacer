@@ -15,6 +15,13 @@ type DailyBaselineState = {
   periodStartKey?: string;
 };
 
+type AdaptiveQuotaState = {
+  date: string;
+  quota: number;
+  periodStartKey?: string;
+  baseline?: number;
+};
+
 export function initStatusBar(context: vscode.ExtensionContext): void {
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -109,27 +116,69 @@ function daysUntilPeriodEnd(periodEnd: Date): number {
  * Must be called AFTER getTodayUsed() so that the dailyBaseline entry has
  * already been written with the correct `baseline` for today.
  */
-function getAdaptiveDailyBudget(usage: CopilotUsage): number {
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const storedQuota = globalState.get<{ date: string; quota: number }>(
-    "copilot-pacer.adaptiveQuota"
-  );
-  if (storedQuota && storedQuota.date === todayKey) {
-    return storedQuota.quota;
+export function resolveAdaptiveDailyBudget(
+  stored: AdaptiveQuotaState | undefined,
+  todayKey: string,
+  periodStartKey: string,
+  todayStartUsed: number,
+  monthlyLimit: number,
+  remainingDays: number,
+): { quota: number; state: AdaptiveQuotaState; reused: boolean } {
+  if (
+    stored
+    && stored.date === todayKey
+    && stored.periodStartKey === periodStartKey
+    && stored.baseline === todayStartUsed
+  ) {
+    return {
+      quota: stored.quota,
+      state: stored,
+      reused: true,
+    };
   }
 
-  // Recompute: start from today's opening baseline (set by getTodayUsed on rollover).
-  const storedBaseline = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
-  const todayStartUsed = storedBaseline?.baseline ?? usage.usedRequests;
-  const remainingRequests = Math.max(0, usage.monthlyLimit - todayStartUsed);
-  const remainingDays = daysUntilPeriodEnd(usage.periodEnd);
+  const remainingRequests = Math.max(0, monthlyLimit - todayStartUsed);
   const quota = Math.max(1, remainingRequests / remainingDays);
 
-  globalState.update("copilot-pacer.adaptiveQuota", { date: todayKey, quota });
-  ext.outputChannel.appendLine(
-    `[adaptive quota] remaining=${Math.round(remainingRequests)} / ${remainingDays} days → ${Math.round(quota)}/day`
+  return {
+    quota,
+    state: {
+      date: todayKey,
+      quota,
+      periodStartKey,
+      baseline: todayStartUsed,
+    },
+    reused: false,
+  };
+}
+
+function getAdaptiveDailyBudget(usage: CopilotUsage): number {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const periodStartKey = usage.periodStart.toISOString().slice(0, 10);
+  const storedQuota = globalState.get<AdaptiveQuotaState>("copilot-pacer.adaptiveQuota");
+
+  // Recompute from today's opening baseline unless a matching cache exists.
+  const storedBaseline = globalState.get<DailyBaselineState>("copilot-pacer.dailyBaseline");
+  const todayStartUsed = storedBaseline?.baseline ?? usage.usedRequests;
+  const remainingDays = daysUntilPeriodEnd(usage.periodEnd);
+  const resolved = resolveAdaptiveDailyBudget(
+    storedQuota,
+    todayKey,
+    periodStartKey,
+    todayStartUsed,
+    usage.monthlyLimit,
+    remainingDays,
   );
-  return quota;
+
+  if (!resolved.reused) {
+    const remainingRequests = Math.max(0, usage.monthlyLimit - todayStartUsed);
+    globalState.update("copilot-pacer.adaptiveQuota", resolved.state);
+    ext.outputChannel.appendLine(
+      `[adaptive quota] remaining=${Math.round(remainingRequests)} / ${remainingDays} days → ${Math.round(resolved.quota)}/day`
+    );
+  }
+
+  return resolved.quota;
 }
 
 function showPromptForToken(text: string, tooltip: string): void {
